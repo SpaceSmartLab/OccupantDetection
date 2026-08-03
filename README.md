@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 열화상 재실자 탐지 모델 비교
 
 `YOLO11s + ByteTrack`와 `RT-DETRv2-S + ByteTrack`를 같은 영상, 같은
@@ -178,3 +179,6 @@ mAP, HOTA, IDF1 또는 MOTA를 계산해야 합니다.
   논문용 속도 비교는 같은 GPU, 같은 warm-up 조건에서 반복 측정하십시오.
 - ByteTrack은 Re-ID 모델이 아니므로 사람이 화면을 완전히 나갔다가
   돌아오면 새 ID가 부여될 수 있습니다.
+=======
+# OccupantDetection
+>>>>>>> 0134e3431a9163b8c1a528aadd069f62a082044e
