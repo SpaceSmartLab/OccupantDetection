@@ -9,6 +9,9 @@ FRAME_FIELDS = (
     "frame_index",
     "timestamp_sec",
     "timestamp_hms",
+    "raw_detection_count",
+    "background_rejected_count",
+    "background_retained_count",
     "detection_count",
     "tracked_count",
     "track_ids",
@@ -63,4 +66,3 @@ def write_csv_rows(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(materialized)
-

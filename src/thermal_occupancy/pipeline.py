@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .background_gate import EmptyBackgroundGate
 from .config import PipelineConfig
 from .detectors import create_detector
 from .evaluation import RunMetrics, compare_model_runs
@@ -84,6 +85,9 @@ def run_model(
         ) from exc
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "effective_config.json").write_text(
+        json.dumps(config.values, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     cap = cv2.VideoCapture(str(config.input_video))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open input video: {config.input_video}")
@@ -94,11 +98,15 @@ def run_model(
     tracker_config = config.section("tracker")
     roi_config = config.section("occupancy", "roi")
     temporal_config = config.section("occupancy", "temporal")
+    background_config = dict(
+        config.values["occupancy"].get("background_gate", {})
+    )
     output_config = config.section("output")
     runtime_config = config.section("runtime")
 
     model_started = time.perf_counter()
     detector = None
+    background_gate: EmptyBackgroundGate | None = None
     video_writer: AnnotatedVideoWriter | NullVideoWriter | None = None
     frame_sink: FrameCsvSink | None = None
     try:
@@ -117,6 +125,31 @@ def run_model(
                 detector.detect(warmup_frame)
             if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
                 raise RuntimeError("Could not rewind the input video after warm-up")
+
+        if bool(background_config.get("enabled", False)):
+            initialization_frames = int(
+                background_config.get("initialization_frames", 50)
+            )
+            empty_frames = _read_initial_background_frames(
+                cv2, cap, frame_count=initialization_frames
+            )
+            background_gate = EmptyBackgroundGate.from_frames(
+                empty_frames,
+                pixel_difference_threshold=int(
+                    background_config.get("pixel_difference_threshold", 25)
+                ),
+                minimum_changed_pixel_ratio=float(
+                    background_config.get("minimum_changed_pixel_ratio", 0.2)
+                ),
+                approved_track_iou_threshold=float(
+                    background_config.get("approved_track_iou_threshold", 0.3)
+                ),
+                blur_kernel_size=int(background_config.get("blur_kernel_size", 5)),
+            )
+            cv2.imwrite(
+                str(output_dir / "empty_background_reference.png"),
+                background_gate.reference_gray,
+            )
 
         tracker = SharedByteTrack(
             frame_rate=info.fps,
@@ -163,19 +196,97 @@ def run_model(
         max_frames_value = runtime_config.get("max_frames")
         max_frames = int(max_frames_value) if max_frames_value is not None else None
         progress_every = int(runtime_config.get("progress_every_frames", 500))
-        frame_index = 0
+        max_consecutive_decode_errors = int(
+            runtime_config.get("max_consecutive_decode_errors", 3)
+        )
+        max_total_decode_errors = int(
+            runtime_config.get("max_total_decode_errors", 100)
+        )
+        if max_consecutive_decode_errors <= 0 or max_total_decode_errors <= 0:
+            raise ValueError("Decode error limits must be greater than zero")
+
+        frames_processed = 0
+        next_source_frame_index = 0
+        consecutive_decode_errors = 0
+        decode_error_indices: list[int] = []
+        raw_detection_total = 0
+        background_rejected_total = 0
+        background_retained_total = 0
+        approved_tracks: dict[int, tuple[Any, int]] = {}
         run_started = time.perf_counter()
 
-        while max_frames is None or frame_index < max_frames:
+        while max_frames is None or frames_processed < max_frames:
+            if (
+                info.total_frames > 0
+                and next_source_frame_index >= info.total_frames
+            ):
+                break
             success, frame = cap.read()
             if not success or frame is None:
-                break
+                failed_index = next_source_frame_index
+                decode_error_indices.append(failed_index)
+                consecutive_decode_errors += 1
+                next_source_frame_index += 1
+                print(
+                    f"[{detector_name}] decode error at source frame "
+                    f"{failed_index:,}; skipping and continuing",
+                    flush=True,
+                )
+                if (
+                    consecutive_decode_errors > max_consecutive_decode_errors
+                    or len(decode_error_indices) > max_total_decode_errors
+                ):
+                    raise RuntimeError(
+                        "Input decoding could not recover within the configured "
+                        "error limits"
+                    )
+                continue
+
+            frame_index = _capture_source_frame_index(
+                cv2,
+                cap,
+                fps=info.fps,
+                fallback=next_source_frame_index,
+            )
+            if frame_index > next_source_frame_index:
+                decode_error_indices.extend(
+                    range(next_source_frame_index, frame_index)
+                )
+            next_source_frame_index = frame_index + 1
+            consecutive_decode_errors = 0
 
             processing_started = time.perf_counter()
             inference_started = time.perf_counter()
-            detections = detector.detect(frame)
+            raw_detections = detector.detect(frame)
             inference_ms = (time.perf_counter() - inference_started) * 1000.0
+
+            raw_detection_total += len(raw_detections)
+            background_rejected_count = 0
+            background_retained_count = 0
+            detections = raw_detections
+            if background_gate is not None:
+                approved_tracks = {
+                    track_id: value
+                    for track_id, value in approved_tracks.items()
+                    if frame_index - value[1]
+                    <= int(tracker_config["lost_track_buffer"])
+                }
+                gate_result = background_gate.filter(
+                    frame,
+                    raw_detections,
+                    approved_boxes=(
+                        value[0].xyxy for value in approved_tracks.values()
+                    ),
+                )
+                detections = gate_result.detections
+                background_rejected_count = gate_result.rejected_count
+                background_retained_count = gate_result.retained_by_track_count
+                background_rejected_total += background_rejected_count
+                background_retained_total += background_retained_count
+
             tracks = tracker.update(detections)
+            for track in tracks:
+                approved_tracks[track.track_id] = (track, frame_index)
             occupancy = counter.update(frame_index, tracks)
             processing_ms = (time.perf_counter() - processing_started) * 1000.0
 
@@ -186,6 +297,9 @@ def run_model(
                     "frame_index": frame_index,
                     "timestamp_sec": f"{timestamp_sec:.6f}",
                     "timestamp_hms": timestamp_hms,
+                    "raw_detection_count": len(raw_detections),
+                    "background_rejected_count": background_rejected_count,
+                    "background_retained_count": background_retained_count,
                     "detection_count": len(detections),
                     "tracked_count": len(tracks),
                     "track_ids": _ids_text(track_ids(tracks)),
@@ -222,13 +336,18 @@ def run_model(
                 tracks=tracks,
                 occupancy=occupancy,
             )
-            frame_index += 1
+            frames_processed += 1
 
-            if progress_every > 0 and frame_index % progress_every == 0:
-                _print_progress(detector_name, frame_index, info.total_frames, run_started)
+            if progress_every > 0 and frames_processed % progress_every == 0:
+                _print_progress(
+                    detector_name,
+                    next_source_frame_index,
+                    info.total_frames,
+                    run_started,
+                )
 
         wall_time_sec = time.perf_counter() - run_started
-        if frame_index == 0:
+        if frames_processed == 0:
             raise RuntimeError("No frames were processed from the input video")
 
         summary = metrics.summary(
@@ -239,16 +358,64 @@ def run_model(
             input_width=info.width,
             input_height=info.height,
             total_input_frames=info.total_frames,
-            frames_processed=frame_index,
+            frames_processed=frames_processed,
             warmup_iterations=warmup_iterations,
             model_load_sec=model_load_sec,
             wall_time_sec=wall_time_sec,
             tracker_settings=tracker.settings,
         )
+        background_settings: dict[str, Any] = {
+            "enabled": background_gate is not None
+        }
+        if background_gate is not None:
+            background_settings.update(background_gate.settings)
+            background_settings["initialization_frames"] = int(
+                background_config.get("initialization_frames", 50)
+            )
+        requested_scope_complete = (
+            max_frames is not None and frames_processed >= max_frames
+        ) or (
+            max_frames is None
+            and (
+                info.total_frames <= 0
+                or next_source_frame_index >= info.total_frames
+            )
+        )
+        summary.update(
+            {
+                "confidence_threshold": float(
+                    common_config["confidence_threshold"]
+                ),
+                "roi_polygon": json.dumps(roi_config["polygon"]),
+                "enter_confirm_sec": float(
+                    temporal_config["enter_confirm_sec"]
+                ),
+                "background_gate_settings": ";".join(
+                    f"{key}={value}" for key, value in background_settings.items()
+                ),
+                "raw_person_detections": raw_detection_total,
+                "background_rejected_detections": background_rejected_total,
+                "background_retained_detections": background_retained_total,
+                "decode_error_count": len(set(decode_error_indices)),
+                "decode_error_frame_indices": ";".join(
+                    str(index) for index in sorted(set(decode_error_indices))
+                ),
+                "source_frames_covered": min(
+                    next_source_frame_index, info.total_frames
+                )
+                if info.total_frames > 0
+                else next_source_frame_index,
+                "completion_status": (
+                    "complete" if requested_scope_complete else "partial"
+                ),
+            }
+        )
         summary_csv = output_dir / "summary.csv"
         write_csv_row(summary_csv, summary)
         print(
-            f"[{detector_name}] complete: {frame_index:,} frames, "
+            f"[{detector_name}] {summary['completion_status']}: "
+            f"{frames_processed:,} decoded frames, "
+            f"{summary['decode_error_count']} skipped, "
             f"{summary['end_to_end_fps']:.2f} FPS",
             flush=True,
         )
@@ -296,6 +463,37 @@ def _read_video_info(cv2: Any, cap: Any) -> VideoInfo:
     return VideoInfo(
         fps=fps, total_frames=total_frames, width=width, height=height
     )
+
+
+def _read_initial_background_frames(
+    cv2: Any, cap: Any, *, frame_count: int
+) -> list[Any]:
+    if frame_count <= 0:
+        raise ValueError("background_gate.initialization_frames must be positive")
+    if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+        raise RuntimeError("Could not seek to the start for background initialization")
+    frames: list[Any] = []
+    for index in range(frame_count):
+        success, frame = cap.read()
+        if not success or frame is None:
+            raise RuntimeError(
+                "Could not read empty-scene background frame " f"{index}"
+            )
+        frames.append(frame)
+    if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+        raise RuntimeError("Could not rewind after background initialization")
+    return frames
+
+
+def _capture_source_frame_index(
+    cv2: Any, cap: Any, *, fps: float, fallback: int
+) -> int:
+    """Use decoded presentation time when available, otherwise expected order."""
+    timestamp_msec = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+    if timestamp_msec < 0:
+        return fallback
+    candidate = int(round(timestamp_msec * fps / 1000.0))
+    return candidate if candidate >= fallback else fallback
 
 
 def _make_run_root(config: PipelineConfig) -> Path:
