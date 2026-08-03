@@ -1,0 +1,4 @@
+# Python 3.9 is supported by this reproducible set. Use a CUDA-matched PyTorch
+# installation first when GPU inference is required.
+-e .
+

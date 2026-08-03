@@ -1,0 +1,51 @@
+input_video: 'C:\Users\w0102\OneDrive\바탕 화면\cctv 샘플영상\원본.mp4'
+output_root: outputs
+
+detectors:
+  enabled:
+    - yolo11s
+    - rtdetrv2_s
+  common:
+    confidence_threshold: 0.10
+    person_class_id: 0
+    image_size: 640
+    device: cpu
+  yolo11s:
+    checkpoint: yolo11s.pt
+    nms_iou_threshold: 0.70
+  rtdetrv2_s:
+    checkpoint: PekingU/rtdetr_v2_r18vd
+
+tracker:
+  type: bytetrack
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.80
+
+occupancy:
+  roi:
+    # Normalized coordinates [x, y]. This default means the whole frame.
+    # Replace these points with the actual measurement zone.
+    polygon:
+      - [0.0, 0.0]
+      - [1.0, 0.0]
+      - [1.0, 1.0]
+      - [0.0, 1.0]
+    anchor: bottom_center
+  temporal:
+    enter_confirm_sec: 0.20
+    exit_confirm_sec: 1.00
+    state_retention_sec: 2.00
+
+output:
+  video_codec: mp4v
+  draw_confidence: true
+  save_video: true
+  save_frame_csv: true
+
+runtime:
+  # Detector timing excludes these model warm-up inferences.
+  warmup_iterations: 3
+  # Use an integer for a quick experiment, or null for the entire video.
+  max_frames: null
+  progress_every_frames: 500

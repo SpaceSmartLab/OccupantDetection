@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thermal-occupancy"
+version = "0.1.0"
+description = "Fair YOLO11s and RT-DETRv2-S occupancy comparison with a shared ByteTrack pipeline"
+readme = "README.md"
+requires-python = ">=3.9,<3.13"
+dependencies = [
+    "numpy>=1.24,<3",
+    "opencv-python>=4.9,<5",
+    "Pillow>=10,<12",
+    "PyYAML>=6,<7",
+    "supervision==0.26.1",
+    "torch>=2.1,<3",
+    "transformers>=4.49,<5",
+    "ultralytics>=8.3,<9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+thermal-occupancy = "thermal_occupancy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
