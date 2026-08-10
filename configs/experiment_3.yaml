@@ -1,0 +1,61 @@
+input_video: 'C:\Users\w0102\OneDrive\바탕 화면\cctv 샘플영상\원본.mp4'
+output_root: outputs/experiment_3_20260810
+
+detectors:
+  enabled:
+    - yolo11s
+  common:
+    # Keep low-confidence boxes so ByteTrack can use them for second-stage
+    # association. New-track confidence is controlled by the sweep below.
+    confidence_threshold: 0.10
+    person_class_id: 0
+    image_size: 640
+    device: cpu
+  yolo11s:
+    checkpoint: yolo11s.pt
+    nms_iou_threshold: 0.70
+
+tracker:
+  type: bytetrack
+  # The sweep command overrides this value for each variant.
+  track_activation_threshold: 0.20
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.80
+
+occupancy:
+  roi:
+    polygon:
+      - [0.00, 0.25]
+      - [0.18, 0.16]
+      - [0.82, 0.16]
+      - [1.00, 0.25]
+      - [1.00, 1.00]
+      - [0.00, 1.00]
+    anchor: bottom_center
+  # No verified empty-scene reference is available for experiment 3.
+  background_gate:
+    enabled: false
+  temporal:
+    enter_confirm_sec: 0.50
+    exit_confirm_sec: 1.00
+    state_retention_sec: 2.00
+
+output:
+  video_codec: mp4v
+  draw_confidence: true
+  save_video: true
+  save_frame_csv: true
+
+runtime:
+  warmup_iterations: 3
+  max_frames: null
+  progress_every_frames: 500
+  max_consecutive_decode_errors: 3
+  max_total_decode_errors: 100
+
+experiment:
+  tracker_activation_thresholds:
+    - 0.20
+    - 0.30
+    - 0.40
+    - 0.50
