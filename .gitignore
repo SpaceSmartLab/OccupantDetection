@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 .cache/
+node_modules/
 models/
 outputs/*
 !outputs/.gitkeep
