@@ -1,7 +1,5 @@
 260825 현재 업데이트 : GT_Class
 
-
-<<<<<<< HEAD
 # 열화상 재실자 탐지 모델 비교
 
 `YOLO11s + ByteTrack`와 `RT-DETRv2-S + ByteTrack`를 같은 영상, 같은
